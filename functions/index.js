@@ -326,6 +326,20 @@ exports.randomChatsPairing = onDocumentCreated("/chats_queue/{documentId}", asyn
   }
 });
 
+exports.triggerAddComment = onDocumentCreated(
+    "posts/{postId}/comments/{commentId}", async (event) => {
+      const postId = event.data.data().postId;
+      const postRef = firestore.collection("posts");
+      try {
+        const postDoc = await postRef.doc(postId).get();
+        const numberOfComments = (postDoc.data().numberOfComments || 0) + 1;
+        await postRef.doc(postId).update({numberOfComments});
+        return numberOfComments;
+      } catch (e) {
+        throw new Error("Error" + e);
+      }
+    });
+
 
 // Create and deploy your first functions
 // https://firebase.google.com/docs/functions/get-started
