@@ -1,3 +1,4 @@
+/* eslint-disable max-len */
 /**
 import { in } from './../node_modules/jest-mock/build/index';
  * Import function triggers from their respective submodules:
@@ -9,7 +10,8 @@ import { in } from './../node_modules/jest-mock/build/index';
  */
 
 const logger = require("firebase-functions/logger");
-const {onDocumentCreated} = require("firebase-functions/v2/firestore");
+// eslint-disable-next-line max-len
+const {onDocumentCreated, onDocumentDeleted, onDocumentUpdated} = require("firebase-functions/v2/firestore");
 const {setGlobalOptions} = require("firebase-functions/v2");
 const admin = require("firebase-admin");
 const {Filter} = require("firebase-admin/firestore");
@@ -19,6 +21,9 @@ const jwt = require("jsonwebtoken");
 admin.initializeApp();
 setGlobalOptions({maxInstances: 10});
 const firestore = admin.firestore();
+const apiUrl = "https://onesignal.com/api/v1/notifications";
+const apiKey = "MzU1MGRmMTctMTFjZC00ZDFjLTg4NDQtZjc1NDljODRhNDhl";
+const appId = "e4027807-c701-4d05-8712-0246cdbbc0d8";
 
 // eslint-disable-next-line max-len
 exports.addTokenField = onDocumentCreated("/fimaers/{documentId}", (event) => {
@@ -340,6 +345,186 @@ exports.triggerAddComment = onDocumentCreated(
       }
     });
 
+exports.triggerAddMessage = onDocumentCreated(
+    "conversations/{conversationsId}/messages/{messagesId}",
+    async (event) => {
+      const conversationsId = event.params.conversationsId;
+      const messagesId = event.params.messagesId;
+      console.log(conversationsId);
+      console.log(messagesId);
+      try {
+        // Retrieve the conversation document with conversationsId
+        // eslint-disable-next-line max-len
+        const conversationRef = firestore.collection("conversations").doc(conversationsId);
+        const conversationSnapshot = await conversationRef.get();
+        const conversationData = conversationSnapshot.data();
+
+        if (!conversationData) {
+          console.log("Conversation document not found.");
+          return;
+        }
+        // eslint-disable-next-line max-len
+        const messageRef = conversationRef.collection("messages").doc(messagesId);
+        const messageSnapshot = await messageRef.get();
+        const messageData = messageSnapshot.data();
+        if (!messageData) {
+          console.log("Message document not found.");
+          return;
+        }
+        const userRef= firestore.collection("fimaers")
+            .doc(messageData.idSender);
+        const userSnapshot = await userRef.get();
+        const userData = userSnapshot.data();
+        logger.info(userData);
+        let userFullName = userData.firstName;
+        if (userData.lastName !== null) {
+          userFullName += " " + userData.lastName;
+        }
+        console.log(userFullName);
+        let noti = messageData.content;
+        switch (messageData.type) {
+          case "TEXT":
+            noti = messageData.content;
+            break;
+          case "MEDIA":
+            noti = "Đã gửi bạn " + messageData.content.length + " ảnh";
+            break;
+          case "POST_LINK":
+            noti = "Đã gửi bạn 1 bài viết";
+            break;
+          default:
+            noti = messageData.content;
+        }
+        const uid1 = conversationData.participantIds[0];
+        const uid2 = conversationData.participantIds[1];
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            app_id: appId,
+            // eslint-disable-next-line max-len
+            include_external_user_ids: [(messageData.idSender === uid1) ? uid2 : uid1],
+            headings: {en: userFullName},
+            contents: {en: noti},
+            android_group: conversationsId,
+            data: {conversationId: conversationsId},
+          }),
+        });
+        logger.info("Conversation Data:", conversationData);
+        logger.info("Message Data:", messageData);
+        const jsonResponse = await response.json();
+        logger.info(jsonResponse);
+        return new Response(
+            JSON.stringify(jsonResponse),
+            {
+              headers: {"Content-Type": "application/json"},
+            },
+        );
+      } catch (e) {
+        throw new Error("Error: " + e);
+      }
+    });
+
+exports.triggerDeleteComment = onDocumentDeleted(
+    "posts/{postId}/comments/{commentId}", async (event) => {
+      const postId = event.data.data().postId;
+      const postRef = firestore.collection("posts");
+      try {
+        const postDoc = await postRef.doc(postId).get();
+        const numberOfComments = (postDoc.data().numberOfComments || 1) - 1;
+        await postRef.doc(postId).update({numberOfComments});
+        return numberOfComments;
+      } catch (e) {
+        throw new Error("Error" + e);
+      }
+    });
+exports.triggerAddPost = onDocumentCreated(
+    "posts/{postId}", async (event) => {
+      const postId = event.data.data().postId;
+      const postMode = event.data.data().postMode;
+      const publisher = event.data.data().publisher;
+      const feedRef = firestore.collection("feeds");
+      const followRef = firestore.collection("follows");
+      const batch = firestore.batch();
+      if (postMode === "PUBLIC") {
+        const feedSnapshots = await feedRef.get();
+        feedSnapshots.forEach((feedSnapshot) => {
+          const feedId = feedSnapshot.id;
+          const feedDocRef = feedRef.doc(feedId);
+          batch.update(feedDocRef, {posts: firestore
+              .FieldValue.arrayUnion(postId)});
+        });
+        await batch.commit();
+      } else if (postMode === "PRIVATE") {
+        try {
+          const feedDoc = await feedRef.doc(publisher).get();
+          if (!feedDoc.exists) {
+            await feedRef.doc(publisher).set({posts: [postId]});
+          } else {
+            const existingPosts = feedDoc.data().posts || [];
+            await feedRef.doc(publisher)
+                .update({posts: [...existingPosts, postId]});
+          }
+        } catch (e) {
+          throw new Error("Error" + e);
+        }
+      } else {
+        try {
+          const followerSnapshots = await followRef
+              .where("follower", "==", publisher).get();
+          followerSnapshots.forEach(async (followerSnapshot) => {
+            const following = followerSnapshot.data().following;
+            const feedDocRef = feedRef.doc(following);
+            const feedDoc = await feedRef.doc(following).get();
+            if (!feedDoc.exists) {
+              batch.set(feedDocRef, {posts: [postId]});
+            } else {
+              batch.update(feedDocRef, {posts: firestore
+                  .FieldValue.arrayUnion(postId)});
+            }
+          });
+          await batch.commit();
+        } catch (e) {
+          throw new Error("Error" + e);
+        }
+      }
+    });
+
+exports.updateLikeuser = onDocumentUpdated("dating-profiles/{userId}", async (event) => {
+  const newValue = event.data.after.data();
+  const oldValue = event.data.before.data();
+
+  const userId = event.data.before.data().uid;
+  const matchsRef = firestore.collection("match");
+
+  const oldLikeUser = oldValue.likedUsers;
+  logger.info(oldLikeUser);
+  const likeUser = newValue.likedUsers;
+  logger.info(likeUser);
+  const newUser = likeUser.filter((value) => !oldLikeUser.includes(value));
+  logger.info(newUser);
+  if (newUser.length > 0) {
+    console.log("test");
+    const datingRef = firestore.collection("dating-profiles").doc(newUser[0]);
+    const datingSnapshot = await datingRef.get();
+    const datingData = datingSnapshot.data();
+    logger.info(userId);
+    logger.info(datingData.likedUsers);
+    console.log(datingData.likedUsers.includes(userId));
+    if (datingData.likedUsers.includes(userId)) {
+      const matchDocRef = matchsRef.doc();
+      await matchDocRef.set({
+        timeMatched: admin.firestore.FieldValue.serverTimestamp(),
+        matchedUsers: [newUser[0], userId],
+        userRead: null,
+        id: matchDocRef.id,
+      });
+    }
+  }
+});
 
 // Create and deploy your first functions
 // https://firebase.google.com/docs/functions/get-started
